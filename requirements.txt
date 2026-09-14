@@ -1,0 +1,7 @@
+requests
+scikit-learn
+pandas
+numpy
+flask
+gunicorn
+google-generativeai

@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.5/controls.css"
+    />
+    <link
+      id="favicon"
+      rel="icon"
+      href="https://www.google.com/favicon.ico"
+      type="image/x-icon"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <title>GoogIe</title>
+    <link rel="stylesheet" href="style.css" />
+
+    <script>
+      // ログアウト処理（サーバーのCookieを削除してリロード）
+      function shutdown() {
+        window.location.href = "/api/logout";
+      }
+    </script>
+
+    <style>
+      .search-bar {
+        position: relative;
+      }
+      #search-history-dropdown {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        width: 100%;
+        background: #1f1f1f;
+        border: 1px solid #333;
+        border-top: none;
+        border-radius: 0 0 8px 8px;
+        z-index: 1000;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+        max-height: 300px;
+        overflow-y: auto;
+        box-sizing: border-box;
+        display: none;
+      }
+      .history-dropdown-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 14px;
+        cursor: pointer;
+        color: #eee;
+        font-size: 14px;
+        transition: background 0.2s;
+      }
+      .history-dropdown-item:hover {
+        background: #333;
+      }
+      .history-dropdown-item .delete-btn {
+        color: #888;
+        font-size: 12px;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+      .history-dropdown-item .delete-btn:hover {
+        color: #ff4e45;
+      }
+    </style>
+  </head>
+  <body>
+    <div style="margin-top: 60px"></div>
+    <header class="header">
+      <div style="display: flex; align-items: center; gap: 15px">
+        <div
+          id="back-btn"
+          style="cursor: pointer; font-size: 20px; padding: 5px; display: none"
+        >
+          ⬅️
+        </div>
+        <div class="logo" onclick="Actions.goHome()">
+          <span class="logo-red">▶</span> Premium
+        </div>
+      </div>
+
+      <div class="search-bar">
+        <input type="text" id="search-input" placeholder="検索" />
+        <button id="search-btn">🔍</button>
+        <div id="search-history-dropdown"></div>
+      </div>
+
+      <div
+        class="user-icons"
+        style="display: flex; align-items: center; gap: 12px"
+      >
+        <div class="icon-circle" onclick="Actions.showSubs()">🔔</div>
+        <div
+          class="icon-circle"
+          onclick="shutdown()"
+          style="
+            cursor: pointer;
+            font-size: 16px;
+            background: rgba(0, 0, 0, 0.05);
+            color: #333;
+          "
+        >
+          ❌
+        </div>
+      </div>
+    </header>
+
+    <div class="main-layout">
+      <nav class="sidebar">
+        <div class="nav-item" onclick="Actions.goHome()">
+          🏠<span>ホーム</span>
+        </div>
+        <div class="nav-item" onclick="Actions.showShorts()">
+          ⚡<span>ショート</span>
+        </div>
+        <div
+          class="nav-item"
+          onclick="Actions.showLiveHub()"
+          style="color: #ff4e45; font-weight: bold"
+        >
+          🔴<span>Live</span>
+        </div>
+        <div class="nav-item" onclick="Actions.showSubs()">
+          👥<span>登録済み</span>
+        </div>
+        <hr />
+        <div class="nav-item" onclick="Actions.showHistory()">
+          🕒<span>履歴</span>
+        </div>
+      </nav>
+      <main class="content" id="view-container"></main>
+    </div>
+
+    <script>
+      (function () {
+        const customHistoryLog = [];
+
+        const originalPushState = window.history.pushState;
+        const originalReplaceState = window.history.replaceState;
+
+        window.history.pushState = function (state, title, url) {
+          if (url) {
+            const currentUrl =
+              window.location.pathname + window.location.search;
+            if (
+              customHistoryLog.length === 0 ||
+              customHistoryLog[customHistoryLog.length - 1] !== currentUrl
+            ) {
+              customHistoryLog.push(currentUrl);
+            }
+          }
+          const result = originalPushState.apply(this, arguments);
+          updateBackButtonVisibility();
+          return result;
+        };
+
+        window.history.replaceState = function (state, title, url) {
+          const result = originalReplaceState.apply(this, arguments);
+          updateBackButtonVisibility();
+          return result;
+        };
+
+        function updateBackButtonVisibility() {
+          const backBtn = document.getElementById("back-btn");
+          if (!backBtn) return;
+          if (customHistoryLog.length > 0) {
+            backBtn.style.display = "block";
+          } else {
+            backBtn.style.display = "none";
+          }
+        }
+
+        window.addEventListener("DOMContentLoaded", () => {
+          const backBtn = document.getElementById("back-btn");
+          if (!backBtn) return;
+
+          backBtn.removeAttribute("onclick");
+          backBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (customHistoryLog.length > 0) {
+              const previousTargetUrl = customHistoryLog.pop();
+              window.history.replaceState(null, "", previousTargetUrl);
+              window.location.href = previousTargetUrl;
+            }
+            updateBackButtonVisibility();
+          });
+
+          document.querySelectorAll(".nav-item, .logo").forEach((element) => {
+            element.addEventListener("click", () => {
+              setTimeout(updateBackButtonVisibility, 150);
+            });
+          });
+        });
+      })();
+    </script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.5/shaka-player.compiled.js"></script>
+    <script src="search.js"></script>
+    <script src="app.js"></script>
+    <script src="backup.js"></script>
+  </body>
+</html>
