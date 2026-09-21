@@ -2,9 +2,33 @@
 const fetch = require("node-fetch"); // node-fetchを明示的に使用
 
 // 全サーバーリスト（27台）
-const APIS = [
-  "https://ppgzlx-3000.csb.app/",
-];
+const APIS = ["https://inv.nadeko.net/",
+  "https://invidious.f5.si/",
+  "https://invidious.lunivers.trade/",
+  "https://invidious.ducks.party/",
+  "https://iv.melmac.space/",
+  "https://invidious.nerdvpn.de/",
+  "https://invidious.privacyredirect.com",
+  "https://invidious.technicalvoid.dev",
+  "https://invidious.darkness.services",
+  "https://invidious.nikkosphere.com",
+  "https://invidious.schenkel.eti.br",
+  "https://invidious.tiekoetter.com",
+  "https://invidious.perennialte.ch",
+  "https://invidious.reallyaweso.me",
+  "https://invidious.private.coffee",
+  "https://invidious.privacydev.net",
+  "https://yewtu.be",
+  "https://iv.nboeck.de",
+  "https://inv.tux.pizza",
+  "https://iv.ggtyler.dev",
+  "https://yt.omada.cafe",
+  "https://super8.absturztau.be",
+  "https://invidious.adminforge.de",
+  "https://youtube.alt.tyil.nl",
+  "https://rust.oskamp.nl",
+  "https://invidious.nietzospannend.nl",
+  "https://youtube.mosesmang.com",];
 
 const TARGET_QUALITIES = ["1080p", "720p", "480p", "360p"];
 
