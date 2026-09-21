@@ -1,6 +1,3 @@
-// --- CODESANDBOX FORCE REWRITE ---
-// このファイルに export という文字は一切存在しません
-
 function isJapanese(text) {
   return /[\u3040-\u309F\u30A0-\u30FF]/.test(text);
 }
