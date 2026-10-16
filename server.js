@@ -101,7 +101,11 @@ app.use((req, res, next) => {
   `);
 });
 
-// 🛠️ 認証済みの場合のみ静的ファイルを配信
+// 🛠️ 認証済みの場合のみトップページと静的ファイルを配信
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
+
 app.use(express.static(__dirname));
 
 // Edge Runtime互換ラッパー
