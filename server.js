@@ -351,6 +351,10 @@ app.all("/api/auth", (req, res) => authHandler(req, res));
 const syncHandler = require("./sync.js").default || require("./sync.js");
 app.all("/api/sync", (req, res) => syncHandler(req, res));
 
+// 📺 GAS / Redis に保存された登録チャンネル新着動画
+const subsFeedHandler = require("./subs-feed.js").default || require("./subs-feed.js");
+app.all("/api/subs-feed", (req, res) => subsFeedHandler(req, res));
+
 const wallpaperHandler =
   require("./wallpaper.js").default || require("./wallpaper.js");
 app.all("/api/wallpaper", (req, res) => wallpaperHandler(req, res));
