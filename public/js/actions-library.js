@@ -35,31 +35,40 @@ Object.assign(Actions, {
     this.Maps(subHtml);
 
     try {
-      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-      let allActivities = [];
-      for (let i = 0; i < subs.length; i += 5) {
-        const chunk = subs.slice(i, i + 5);
-        const promises = chunk.map((ch) =>
-          YT.fetchAPI("activities", {
-            channelId: ch.id,
-            part: "snippet,contentDetails",
-            maxResults: 5,
-            publishedAfter: threeDaysAgo.toISOString(),
-          })
-        );
-        const results = await Promise.all(promises);
-        results.forEach((res) => {
-          if (res.items) allActivities = [...allActivities, ...res.items];
-        });
+      // 新着動画はGASが収集してRedisに保存済み。ブラウザからYouTube APIは呼び出さない。
+      const channelIds = subs.map((ch) => ch.id).filter(Boolean);
+      if (channelIds.length === 0) {
+        this.currentList = [];
+        const emptyGrid = document.getElementById("subs-timeline-grid");
+        if (emptyGrid) {
+          emptyGrid.innerHTML =
+            `<p style="color:#aaa; text-align:center; grid-column: 1/-1; padding:40px;">チャンネルを登録すると新着動画が表示されます。</p>`;
+        }
+        return;
       }
-      const timelineVideos = allActivities
-        .filter((a) => a.snippet.type === "upload")
-        .sort(
-          (a, b) =>
-            new Date(b.snippet.publishedAt) - new Date(a.snippet.publishedAt)
-        );
+
+      const response = await fetch(
+        `/api/subs-feed?ids=${encodeURIComponent(channelIds.join(","))}`,
+        { method: "GET", cache: "no-store" }
+      );
+      if (!response.ok) throw new Error(`Subs feed API error: ${response.status}`);
+
+      const feedData = await response.json();
+      const timelineVideos = (feedData.videos || []).map((video) => ({
+        id: video.videoId || video.id,
+        snippet: {
+          title: video.title || "",
+          thumbnails: {
+            high: { url: video.thumbnail || "" },
+          },
+          channelTitle: video.channelTitle || video.channelName || "",
+          channelId: video.channelId || "",
+          publishedAt: video.publishedAt || "",
+        },
+      }));
+
       this.currentList = timelineVideos;
-      await this.fillStats(this.currentList);
+      // 統計情報取得のためのYouTube API呼び出しもここでは行わない。
       const grid = document.getElementById("subs-timeline-grid");
       if (grid)
         grid.innerHTML =
