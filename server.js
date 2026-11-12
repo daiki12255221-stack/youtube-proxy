@@ -6,9 +6,9 @@ const { getStreamUrl } = require("./streaming.js");
 const app = express();
 
 // 🔑 サーバー側で保持する秘密の合言葉（フロントからは絶対に見えません）
-const SECRET_KEY = "python-study";
+const SECRET_KEY = "json-study";
 const AUTH_COOKIE_NAME = "app_auth_token";
-const AUTH_TOKEN_VALUE = "valid_authenticated_user_token_98765";
+const AUTH_TOKEN_VALUE = "valid_authenticated_user_token_98777";
 
 // 簡易Cookieパーサー関数（これの定義が抜けていたためエラーになっています）
 function parseCookies(req) {
