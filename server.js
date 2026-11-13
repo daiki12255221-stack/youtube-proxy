@@ -114,6 +114,31 @@ app.get("/", (req, res, next) => {
 <script>document.getElementById('login').addEventListener('submit',async function(e){e.preventDefault();const button=this.querySelector('button');const message=document.getElementById('message');button.disabled=true;message.textContent='認証中…';try{const response=await fetch('/api/developer/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('password').value})});const data=await response.json();if(!response.ok)throw new Error(data.error||'ログインできませんでした');location.replace('/');}catch(error){message.textContent=error.message;button.disabled=false;}});</script></body></html>`);
 });
 
+
+// 🔐 開発者コンソール：開発者セッションだけに限定
+function requireDeveloperSession(req, res, next) {
+  const cookies = parseCookies(req);
+  if (!isValidDeveloperSession(cookies[DEVELOPER_COOKIE_NAME])) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(403).send("403 Forbidden");
+  }
+  next();
+}
+
+// ?mode=Console は開発者セッションがある場合だけHTMLを返す。
+// 一般ユーザーCookieや旧Storage.isAdmin()は認証に使わない。
+app.get("/", (req, res, next) => {
+  if (req.query.mode !== "Console") return next();
+  const cookies = parseCookies(req);
+  if (!isValidDeveloperSession(cookies[DEVELOPER_COOKIE_NAME])) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(403).send("403 Forbidden");
+  }
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  return res.sendFile(path.join(__dirname, ".developer-console.html"));
+});
+
 // 開発者パスワードの照合と、署名付き・期限付きHttpOnlyセッションの発行
 const developerLoginAttempts = new Map();
 app.post("/api/developer/login", (req, res) => {
@@ -199,6 +224,28 @@ app.use((req, res, next) => {
     </body>
     </html>
   `);
+});
+
+// コンソール用JSは開発者セッション専用。一般ユーザーCookieでは取得不可。
+app.get("/developer-console.js", requireDeveloperSession, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  return res.sendFile(path.join(__dirname, ".developer-private", "developer-console.js"));
+});
+
+// コンソール用APIも開発者セッション専用。
+// 現段階では表示用の状態だけ返し、未実装機能を架空の件数で表示しない。
+app.get("/api/developer/console-status", requireDeveloperSession, (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  return res.json({
+    ok: true,
+    features: {
+      authenticationRequests: "not_connected",
+      approvalQueue: "not_connected",
+      oneTimeCodes: "not_connected",
+      sessionManagement: "not_connected"
+    }
+  });
 });
 
 // 🛠️ 認証済みの場合のみトップページと静的ファイルを配信
