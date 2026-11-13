@@ -2,6 +2,8 @@ const express = require("express");
 const path = require("path");
 const fetch = require("node-fetch");
 const crypto = require("crypto");
+const { Redis } = require("@upstash/redis");
+const kv = new Redis({ url: "https://big-monkfish-128403.upstash.io", token: "gQAAAAAAAfWTAAIgcDFiMmMyYjE5ZTA5ODc0Y2ZiYTM2NGFiYTU4MWVlMGViYQ" });
 const { getStreamUrl } = require("./streaming.js");
 
 const app = express();
@@ -101,6 +103,38 @@ app.get("/api/ping", (req, res) => {
   return res.status(200).send("alive");
 });
 
+// 一般ユーザーの申請入口。秘密鍵を知っている人だけが申請ページへ進める。
+const REQUEST_ENTRY_COOKIE = "access_request_entry";
+const REQUEST_ENTRY_TTL = 15 * 60;
+function requestEntryOptions() {
+  return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: REQUEST_ENTRY_TTL * 1000 };
+}
+app.get("/access-request", async (req, res) => {
+  const entry = parseCookies(req)[REQUEST_ENTRY_COOKIE];
+  if (!entry || !(await kv.get(`access:entry:${entry}`))) return res.status(403).send("申請用URLから入り直してください。");
+  res.setHeader("Cache-Control", "no-store");
+  res.type("html").send(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>利用申請</title><style>body{font-family:system-ui;background:#101827;color:#eef;padding:24px}.box{max-width:440px;margin:8vh auto;background:#1b2940;padding:24px;border-radius:14px}input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:12px;border-radius:8px;border:1px solid #53627a}input{background:#101827;color:white}button{background:#dce8ff;color:#10203a;font-weight:bold}#msg{white-space:pre-wrap}</style><main class="box"><h1>サイト利用申請</h1><p>開発者の承認後、利用コードが発行されます。</p><form id="f"><label>表示名<input name="displayName" maxlength="32" required></label><button>認証を申請する</button></form><p id="msg" role="status"></p></main><script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const r=await fetch('/api/access/request',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({displayName:e.target.displayName.value})});const d=await r.json();if(!r.ok)throw Error(d.error||'申請できませんでした');document.getElementById('msg').textContent='申請を受け付けました。開発者の承認をお待ちください。申請ID: '+d.requestId;e.target.remove();}catch(x){document.getElementById('msg').textContent=x.message;b.disabled=false;}});</script></html>`);
+});
+app.post("/api/access/request", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const entry = parseCookies(req)[REQUEST_ENTRY_COOKIE];
+    if (!entry || !(await kv.get(`access:entry:${entry}`))) return res.status(403).json({ error: "申請用URLから入り直してください。" });
+    const displayName = typeof req.body?.displayName === "string" ? req.body.displayName.trim().slice(0, 32) : "";
+    if (!displayName) return res.status(400).json({ error: "表示名を入力してください。" });
+    const requestId = crypto.randomUUID();
+    const record = { id: requestId, displayName, status: "pending", createdAt: new Date().toISOString() };
+    await kv.set(`access:request:${requestId}`, JSON.stringify(record), { ex: 60 * 60 * 24 * 14 });
+    await kv.lpush("access:requests", requestId);
+    await kv.del(`access:entry:${entry}`);
+    res.clearCookie(REQUEST_ENTRY_COOKIE, { path: "/" });
+    return res.status(201).json({ ok: true, requestId });
+  } catch (error) {
+    console.error("access request error", error.message);
+    return res.status(503).json({ error: "申請を保存できませんでした。時間をおいて再試行してください。" });
+  }
+});
+
 // 開発者ログイン画面。URLのmode値は画面表示にしか使いません。
 app.get("/", (req, res, next) => {
   if (req.query.mode !== DEVELOPER_MODE_ID) return next();
@@ -184,17 +218,17 @@ app.get("/api/logout", (req, res) => {
 });
 
 // 🛡️ 【最重要】バックエンド認証ミドルウェア
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   // 1. URLパラメータに合言葉（?mode=python-study）が含まれている場合
   if (req.query.mode === SECRET_KEY) {
-    // 認証用Cookieを付与 (有効期限 30日)
-    res.cookie(AUTH_COOKIE_NAME, AUTH_TOKEN_VALUE, {
-      httpOnly: true, // JavaScriptからの読み取りを防止してセキュリティ強化
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-    });
-    // パラメータを消してトップページへクリーンにリダイレクト
-    return res.redirect(req.path);
+    const entry = crypto.randomBytes(24).toString("hex");
+    try { await kv.set(`access:entry:${entry}`, "1", { ex: REQUEST_ENTRY_TTL }); }
+    catch (error) { console.error("entry creation error", error.message); return res.status(503).send("申請ページを準備できませんでした。時間をおいて再試行してください。"); }
+    res.cookie(REQUEST_ENTRY_COOKIE, entry, requestEntryOptions());
+    return res.redirect("/access-request");
   }
+  // 申請ページと申請APIは、申請用ワンタイム入口Cookieで個別に認証する。
+  if (req.path === "/access-request" || req.path === "/api/access/request") return next();
 
   // 2. 一般ユーザーCookieまたは有効な開発者セッションを確認
   const cookies = parseCookies(req);
@@ -233,6 +267,44 @@ app.get("/developer-console.js", requireDeveloperSession, (req, res) => {
   return res.sendFile(path.join(__dirname, "private-console", "developer-console.js"));
 });
 
+// 開発者コンソール：申請一覧
+app.get("/api/developer/requests", requireDeveloperSession, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const ids = await kv.lrange("access:requests", 0, 99);
+    const records = [];
+    for (const id of ids) {
+      const raw = await kv.get(`access:request:${id}`);
+      if (!raw) continue;
+      const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (item.status === "pending") records.push(item);
+    }
+    return res.json({ ok: true, requests: records });
+  } catch (error) {
+    console.error("request list error", error.message);
+    return res.status(503).json({ ok: false, error: "申請一覧を取得できませんでした。" });
+  }
+});
+app.post("/api/developer/requests/:id/decision", requireDeveloperSession, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const decision = req.body?.decision;
+  if (!["approved", "rejected"].includes(decision)) return res.status(400).json({ error: "不正な操作です。" });
+  try {
+    const key = `access:request:${req.params.id}`;
+    const raw = await kv.get(key);
+    if (!raw) return res.status(404).json({ error: "申請が見つかりません。" });
+    const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (item.status !== "pending") return res.status(409).json({ error: "この申請はすでに処理されています。" });
+    item.status = decision;
+    item.decidedAt = new Date().toISOString();
+    await kv.set(key, JSON.stringify(item), { ex: 60 * 60 * 24 * 14 });
+    return res.json({ ok: true, status: decision });
+  } catch (error) {
+    console.error("request decision error", error.message);
+    return res.status(503).json({ error: "処理を保存できませんでした。" });
+  }
+});
+
 // コンソール用APIも開発者セッション専用。
 // 現段階では表示用の状態だけ返し、未実装機能を架空の件数で表示しない。
 app.get("/api/developer/console-status", requireDeveloperSession, (req, res) => {
@@ -240,8 +312,8 @@ app.get("/api/developer/console-status", requireDeveloperSession, (req, res) => 
   return res.json({
     ok: true,
     features: {
-      authenticationRequests: "not_connected",
-      approvalQueue: "not_connected",
+      authenticationRequests: "connected",
+      approvalQueue: "connected",
       oneTimeCodes: "not_connected",
       sessionManagement: "not_connected"
     }
