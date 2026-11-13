@@ -17,9 +17,9 @@ const DEVELOPER_MODE_ID = "67247431";
 const DEVELOPER_COOKIE_NAME = "developer_session";
 const DEVELOPER_SESSION_MAX_AGE = 12 * 60 * 60 * 1000; // 12時間
 // ★ 開発者パスワード：ここを変更（16文字以上を推奨）
-const DEVELOPER_PASSWORD = "ここを変更してください_16文字以上";
+const DEVELOPER_PASSWORD = "mmhmr38bbamanaita";
 // ★ セッション署名用の秘密文字列：ここも別のランダムな値に変更（32文字以上）
-const DEVELOPER_SESSION_SECRET = "ここを変更してください_別のランダムな32文字以上の文字列";
+const DEVELOPER_SESSION_SECRET = "47357694593793232836817336800406";
 
 function signDeveloperSession(issuedAt) {
   return crypto
