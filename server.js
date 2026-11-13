@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require("path");
 const fetch = require("node-fetch");
+const crypto = require("crypto");
 const { getStreamUrl } = require("./streaming.js");
 
 const app = express();
@@ -9,6 +10,52 @@ const app = express();
 const SECRET_KEY = "json-study";
 const AUTH_COOKIE_NAME = "app_auth_token";
 const AUTH_TOKEN_VALUE = "valid_authenticated_user_token_98777";
+
+// 開発者ログイン設定
+// URLの数字はログイン画面を表示するための識別子であり、認証情報ではありません。
+const DEVELOPER_MODE_ID = "67247431";
+const DEVELOPER_COOKIE_NAME = "developer_session";
+const DEVELOPER_SESSION_MAX_AGE = 12 * 60 * 60 * 1000; // 12時間
+// ★ 開発者パスワード：ここを変更（16文字以上を推奨）
+const DEVELOPER_PASSWORD = "ここを変更してください_16文字以上";
+// ★ セッション署名用の秘密文字列：ここも別のランダムな値に変更（32文字以上）
+const DEVELOPER_SESSION_SECRET = "ここを変更してください_別のランダムな32文字以上の文字列";
+
+function signDeveloperSession(issuedAt) {
+  return crypto
+    .createHmac("sha256", DEVELOPER_SESSION_SECRET)
+    .update(String(issuedAt))
+    .digest("hex");
+}
+
+function isValidDeveloperSession(token) {
+  if (!token || !DEVELOPER_SESSION_SECRET) return false;
+  const [issuedAtText, suppliedSignature] = token.split(".");
+  const issuedAt = Number(issuedAtText);
+  if (!Number.isSafeInteger(issuedAt) || !suppliedSignature) return false;
+
+  const age = Date.now() - issuedAt;
+  if (age < 0 || age > DEVELOPER_SESSION_MAX_AGE) return false;
+
+  const expected = Buffer.from(signDeveloperSession(issuedAt), "hex");
+  let supplied;
+  try {
+    supplied = Buffer.from(suppliedSignature, "hex");
+  } catch {
+    return false;
+  }
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+
+function developerCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/",
+    maxAge: DEVELOPER_SESSION_MAX_AGE,
+  };
+}
 
 // 簡易Cookieパーサー関数（これの定義が抜けていたためエラーになっています）
 function parseCookies(req) {
@@ -54,9 +101,60 @@ app.get("/api/ping", (req, res) => {
   return res.status(200).send("alive");
 });
 
-// 🚪 ログアウト処理 (Cookie削除)
+// 開発者ログイン画面。URLのmode値は画面表示にしか使いません。
+app.get("/", (req, res, next) => {
+  if (req.query.mode !== DEVELOPER_MODE_ID) return next();
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  return res.status(200).send(`<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Developer Login</title>
+<style>body{font-family:sans-serif;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0}.panel{width:min(360px,calc(100% - 40px));background:#222;padding:24px;border-radius:14px;box-sizing:border-box}input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:12px;border-radius:8px;border:1px solid #555}input{background:#111;color:#fff}button{background:#eee;color:#111;font-weight:bold;cursor:pointer}#message{color:#ff8a80;min-height:1.5em;font-size:14px}</style></head>
+<body><main class="panel"><h2>開発者ログイン</h2><form id="login"><label for="password">開発者パスワード</label><input id="password" type="password" autocomplete="current-password" required><button type="submit">ログイン</button></form><p id="message" role="status"></p></main>
+<script>document.getElementById('login').addEventListener('submit',async function(e){e.preventDefault();const button=this.querySelector('button');const message=document.getElementById('message');button.disabled=true;message.textContent='認証中…';try{const response=await fetch('/api/developer/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('password').value})});const data=await response.json();if(!response.ok)throw new Error(data.error||'ログインできませんでした');location.replace('/');}catch(error){message.textContent=error.message;button.disabled=false;}});</script></body></html>`);
+});
+
+// 開発者パスワードの照合と、署名付き・期限付きHttpOnlyセッションの発行
+const developerLoginAttempts = new Map();
+app.post("/api/developer/login", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  if (!DEVELOPER_PASSWORD || DEVELOPER_PASSWORD.length < 16 || !DEVELOPER_SESSION_SECRET || DEVELOPER_SESSION_SECRET.length < 32) {
+    return res.status(503).json({ error: "開発者ログインの設定を確認してください。パスワードは16文字以上、署名用秘密文字列は32文字以上にしてください。" });
+  }
+
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const attempt = developerLoginAttempts.get(ip) || { count: 0, resetAt: now + 15 * 60 * 1000 };
+  if (now > attempt.resetAt) {
+    attempt.count = 0;
+    attempt.resetAt = now + 15 * 60 * 1000;
+  }
+  if (attempt.count >= 5) {
+    return res.status(429).json({ error: "試行回数が多すぎます。しばらく待ってから再試行してください。" });
+  }
+
+  const suppliedPassword = typeof req.body?.password === "string" ? req.body.password : "";
+  const expectedDigest = crypto.createHash("sha256").update(DEVELOPER_PASSWORD, "utf8").digest();
+  const suppliedDigest = crypto.createHash("sha256").update(suppliedPassword, "utf8").digest();
+  const passwordMatches = crypto.timingSafeEqual(expectedDigest, suppliedDigest);
+
+  if (!passwordMatches) {
+    attempt.count += 1;
+    developerLoginAttempts.set(ip, attempt);
+    return res.status(401).json({ error: "パスワードが違います。" });
+  }
+
+  developerLoginAttempts.delete(ip);
+  const issuedAt = Date.now();
+  const token = `${issuedAt}.${signDeveloperSession(issuedAt)}`;
+  res.cookie(DEVELOPER_COOKIE_NAME, token, developerCookieOptions());
+  return res.status(200).json({ ok: true });
+});
+
+// 🚪 ログアウト処理 (一般・開発者Cookieを削除)
 app.get("/api/logout", (req, res) => {
-  res.clearCookie(AUTH_COOKIE_NAME);
+  res.clearCookie(AUTH_COOKIE_NAME, { path: "/" });
+  res.clearCookie(DEVELOPER_COOKIE_NAME, { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" });
   return res.redirect("/");
 });
 
@@ -73,11 +171,13 @@ app.use((req, res, next) => {
     return res.redirect(req.path);
   }
 
-  // 2. 正しいCookieを持っているか判定
-  // 自作の parseCookies(req) を使って安全に読み込みます
+  // 2. 一般ユーザーCookieまたは有効な開発者セッションを確認
   const cookies = parseCookies(req);
   if (cookies[AUTH_COOKIE_NAME] === AUTH_TOKEN_VALUE) {
-    return next(); // 認証成功：次の処理へ
+    return next();
+  }
+  if (isValidDeveloperSession(cookies[DEVELOPER_COOKIE_NAME])) {
+    return next();
   }
 
   // 3. 未認証の場合は 403 Forbidden を返してアクセスを完全にブロック
