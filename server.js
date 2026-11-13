@@ -136,7 +136,7 @@ app.get("/", (req, res, next) => {
   }
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Robots-Tag", "noindex, nofollow");
-  return res.sendFile(path.join(__dirname, ".developer-console.html"));
+  return res.sendFile(path.join(__dirname, "private-console", "developer-console.html"));
 });
 
 // 開発者パスワードの照合と、署名付き・期限付きHttpOnlyセッションの発行
@@ -230,7 +230,7 @@ app.use((req, res, next) => {
 app.get("/developer-console.js", requireDeveloperSession, (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
-  return res.sendFile(path.join(__dirname, ".developer-private", "developer-console.js"));
+  return res.sendFile(path.join(__dirname, "private-console", "developer-console.js"));
 });
 
 // コンソール用APIも開発者セッション専用。
