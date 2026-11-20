@@ -103,18 +103,125 @@ app.get("/api/ping", (req, res) => {
   return res.status(200).send("alive");
 });
 
-// 一般ユーザーの申請入口。秘密鍵を知っている人だけが申請ページへ進める。
+// 一般ユーザーの申請入口・申請後の状態確認・ワンタイムコード認証
 const REQUEST_ENTRY_COOKIE = "access_request_entry";
+const REQUEST_TRACK_COOKIE = "access_request_track";
 const REQUEST_ENTRY_TTL = 15 * 60;
+const REQUEST_TRACK_TTL = 60 * 60 * 24 * 14;
+const ONE_TIME_CODE_TTL = 10 * 60;
+const USER_SESSION_TTL = 60 * 60 * 24 * 30;
+
 function requestEntryOptions() {
   return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: REQUEST_ENTRY_TTL * 1000 };
 }
+function requestTrackOptions() {
+  return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: REQUEST_TRACK_TTL * 1000 };
+}
+function userAuthCookieOptions() {
+  return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: USER_SESSION_TTL * 1000 };
+}
+function hashAccessToken(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+function hashOneTimeCode(requestId, code) {
+  return crypto.createHash("sha256")
+    .update(`${requestId}:${code}:${DEVELOPER_SESSION_SECRET}`)
+    .digest("hex");
+}
+
 app.get("/access-request", async (req, res) => {
-  const entry = parseCookies(req)[REQUEST_ENTRY_COOKIE];
-  if (!entry || !(await kv.get(`access:entry:${entry}`))) return res.status(403).send("申請用URLから入り直してください。");
   res.setHeader("Cache-Control", "no-store");
-  res.type("html").send(`<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>利用申請</title><style>body{font-family:system-ui;background:#101827;color:#eef;padding:24px}.box{max-width:440px;margin:8vh auto;background:#1b2940;padding:24px;border-radius:14px}input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:12px;border-radius:8px;border:1px solid #53627a}input{background:#101827;color:white}button{background:#dce8ff;color:#10203a;font-weight:bold}#msg{white-space:pre-wrap}</style><main class="box"><h1>サイト利用申請</h1><p>開発者の承認後、利用コードが発行されます。</p><form id="f"><label>表示名<input name="displayName" maxlength="32" required></label><button>認証を申請する</button></form><p id="msg" role="status"></p></main><script>document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const r=await fetch('/api/access/request',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({displayName:e.target.displayName.value})});const d=await r.json();if(!r.ok)throw Error(d.error||'申請できませんでした');document.getElementById('msg').textContent='申請を受け付けました。開発者の承認をお待ちください。申請ID: '+d.requestId;e.target.remove();}catch(x){document.getElementById('msg').textContent=x.message;b.disabled=false;}});</script></html>`);
+  try {
+    const cookies = parseCookies(req);
+    const trackingId = cookies[REQUEST_TRACK_COOKIE];
+
+    if (trackingId) {
+      const raw = await kv.get(`access:request:${trackingId}`);
+      if (raw) {
+        const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (item.status === "pending") {
+          return res.type("html").send(accessRequestPage("pending"));
+        }
+        if (item.status === "rejected") {
+          return res.type("html").send(accessRequestPage("rejected"));
+        }
+        if (item.status === "approved") {
+          return res.type("html").send(accessRequestPage("approved"));
+        }
+        if (item.status === "completed") {
+          return res.type("html").send(accessRequestPage("completed"));
+        }
+      }
+      res.clearCookie(REQUEST_TRACK_COOKIE, { path: "/" });
+    }
+
+    const entry = cookies[REQUEST_ENTRY_COOKIE];
+    if (!entry || !(await kv.get(`access:entry:${entry}`))) {
+      return res.status(403).send("申請用URLから入り直してください。");
+    }
+    return res.type("html").send(accessRequestPage("new"));
+  } catch (error) {
+    console.error("access page error", error.message);
+    return res.status(503).send("申請ページを読み込めませんでした。時間をおいて再試行してください。");
+  }
 });
+
+function accessRequestPage(initialState) {
+  return `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>サイト利用認証</title>
+<style>
+body{font-family:system-ui;background:#101827;color:#eef;padding:24px}.box{max-width:440px;margin:8vh auto;background:#1b2940;padding:24px;border-radius:14px}
+input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:12px;border-radius:8px;border:1px solid #53627a}
+input{background:#101827;color:white}button{background:#dce8ff;color:#10203a;font-weight:bold;cursor:pointer}
+button:disabled{opacity:.55}#msg{white-space:pre-wrap;line-height:1.7}.hidden{display:none}
+</style>
+<main class="box"><h1>サイト利用認証</h1><div id="request" class="${initialState === "new" ? "" : "hidden"}">
+<p>表示名を入力して認証を申請してください。</p><form id="request-form"><label>表示名<input name="displayName" maxlength="32" required></label><button>認証を申請する</button></form></div>
+<div id="code-area" class="${initialState === "approved" ? "" : "hidden"}"><p>申請が承認されました。管理者から受け取ったワンタイムパスワードを入力してください。</p><form id="code-form"><label>ワンタイムパスワード<input name="code" inputmode="numeric" autocomplete="one-time-code" minlength="8" maxlength="8" required></label><button>認証する</button></form></div>
+<p id="msg" role="status">${initialState === "pending" ? "申請を受け付けました。管理者の承認をお待ちください。このページを開いたままお待ちください。" : initialState === "rejected" ? "申請は承認されませんでした。必要な場合は管理者にお問い合わせください。" : initialState === "completed" ? "この申請はすでに認証済みです。サイトを開き直してください。" : ""}</p>
+</main>
+<script>
+const msg=document.getElementById('msg');
+const requestBox=document.getElementById('request');
+const codeArea=document.getElementById('code-area');
+function showState(state){
+  if(state==='pending'){requestBox.classList.add('hidden');codeArea.classList.add('hidden');msg.textContent='申請を受け付けました。管理者の承認をお待ちください。このページを開いたままお待ちください。';}
+  if(state==='approved'){requestBox.classList.add('hidden');codeArea.classList.remove('hidden');msg.textContent='申請が承認されました。ワンタイムパスワードを入力してください。';}
+  if(state==='rejected'){requestBox.classList.add('hidden');codeArea.classList.add('hidden');msg.textContent='申請は承認されませんでした。必要な場合は管理者にお問い合わせください。';}
+  if(state==='completed'){requestBox.classList.add('hidden');codeArea.classList.add('hidden');msg.textContent='この申請はすでに認証済みです。サイトを開き直してください。';}
+}
+document.getElementById('request-form')?.addEventListener('submit',async e=>{
+  e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;
+  try{const r=await fetch('/api/access/request',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({displayName:e.target.displayName.value})});const d=await r.json();if(!r.ok)throw Error(d.error||'申請できませんでした');showState('pending');}
+  catch(x){msg.textContent=x.message;b.disabled=false;}
+});
+document.getElementById('code-form')?.addEventListener('submit',async e=>{
+  e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;msg.textContent='認証中…';
+  try{const r=await fetch('/api/access/verify-code',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify({code:e.target.code.value.trim()})});const d=await r.json();if(!r.ok)throw Error(d.error||'認証できませんでした');msg.textContent='認証しました。サイトへ移動します…';location.replace('/');}
+  catch(x){msg.textContent=x.message;b.disabled=false;}
+});
+async function pollStatus(){
+  try{const r=await fetch('/api/access/status',{credentials:'same-origin',cache:'no-store'});const d=await r.json();if(r.ok&&d.status)showState(d.status);}
+  catch(_){}
+}
+setInterval(pollStatus,5000);
+</script></html>`;
+}
+
+app.get("/api/access/status", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const requestId = parseCookies(req)[REQUEST_TRACK_COOKIE];
+    if (!requestId) return res.status(401).json({ error: "申請情報がありません。" });
+    const raw = await kv.get(`access:request:${requestId}`);
+    if (!raw) return res.status(404).json({ error: "申請が見つかりません。" });
+    const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return res.json({ ok: true, status: item.status });
+  } catch (error) {
+    console.error("access status error", error.message);
+    return res.status(503).json({ error: "状態を確認できませんでした。" });
+  }
+});
+
 app.post("/api/access/request", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   try {
@@ -124,14 +231,64 @@ app.post("/api/access/request", async (req, res) => {
     if (!displayName) return res.status(400).json({ error: "表示名を入力してください。" });
     const requestId = crypto.randomUUID();
     const record = { id: requestId, displayName, status: "pending", createdAt: new Date().toISOString() };
-    await kv.set(`access:request:${requestId}`, JSON.stringify(record), { ex: 60 * 60 * 24 * 14 });
+    await kv.set(`access:request:${requestId}`, JSON.stringify(record), { ex: REQUEST_TRACK_TTL });
     await kv.lpush("access:requests", requestId);
     await kv.del(`access:entry:${entry}`);
     res.clearCookie(REQUEST_ENTRY_COOKIE, { path: "/" });
+    res.cookie(REQUEST_TRACK_COOKIE, requestId, requestTrackOptions());
     return res.status(201).json({ ok: true, requestId });
   } catch (error) {
     console.error("access request error", error.message);
     return res.status(503).json({ error: "申請を保存できませんでした。時間をおいて再試行してください。" });
+  }
+});
+
+app.post("/api/access/verify-code", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const requestId = parseCookies(req)[REQUEST_TRACK_COOKIE];
+    const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
+    if (!requestId) return res.status(401).json({ error: "申請情報がありません。申請URLからやり直してください。" });
+    if (!/^\d{8}$/.test(code)) return res.status(400).json({ error: "8桁のコードを入力してください。" });
+
+    const key = `access:request:${requestId}`;
+    const raw = await kv.get(key);
+    if (!raw) return res.status(404).json({ error: "申請が見つかりません。" });
+    const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (item.status !== "approved") return res.status(409).json({ error: "この申請はまだ承認されていないか、すでに使用済みです。" });
+    if (!item.oneTimeCodeHash || !item.oneTimeCodeExpiresAt || Date.now() > Date.parse(item.oneTimeCodeExpiresAt)) {
+      return res.status(410).json({ error: "ワンタイムパスワードの有効期限が切れています。管理者に再申請を依頼してください。" });
+    }
+    const suppliedHash = hashOneTimeCode(requestId, code);
+    const expected = Buffer.from(item.oneTimeCodeHash, "hex");
+    const supplied = Buffer.from(suppliedHash, "hex");
+    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+      const attemptsKey = `access:code-attempts:${requestId}`;
+      const attempts = await kv.incr(attemptsKey);
+      if (attempts === 1) await kv.expire(attemptsKey, ONE_TIME_CODE_TTL);
+      if (attempts >= 5) {
+        return res.status(429).json({ error: "コードの入力回数が上限に達しました。管理者に再申請を依頼してください。" });
+      }
+      return res.status(401).json({ error: "ワンタイムパスワードが違います。" });
+    }
+
+    // RedisのNX書き込みを使い、同じコードを同時に送信しても1回だけ成功させる。
+    const consumed = await kv.set(`access:code-used:${requestId}`, "1", { nx: true, ex: ONE_TIME_CODE_TTL });
+    if (consumed !== "OK") return res.status(409).json({ error: "このワンタイムパスワードはすでに使用されています。" });
+
+    const sessionToken = crypto.randomBytes(32).toString("hex");
+    await kv.set(`access:session:${hashAccessToken(sessionToken)}`, JSON.stringify({ requestId, createdAt: new Date().toISOString() }), { ex: USER_SESSION_TTL });
+    item.status = "completed";
+    item.completedAt = new Date().toISOString();
+    delete item.oneTimeCodeHash;
+    delete item.oneTimeCodeExpiresAt;
+    await kv.set(key, JSON.stringify(item), { ex: REQUEST_TRACK_TTL });
+    res.cookie(AUTH_COOKIE_NAME, sessionToken, userAuthCookieOptions());
+    res.clearCookie(REQUEST_TRACK_COOKIE, { path: "/" });
+    return res.json({ ok: true });
+  } catch (error) {
+    console.error("one-time code verification error", error.message);
+    return res.status(503).json({ error: "認証処理に失敗しました。時間をおいて再試行してください。" });
   }
 });
 
@@ -235,6 +392,15 @@ app.use(async (req, res, next) => {
   if (cookies[AUTH_COOKIE_NAME] === AUTH_TOKEN_VALUE) {
     return next();
   }
+  if (cookies[AUTH_COOKIE_NAME]) {
+    try {
+      const session = await kv.get(`access:session:${hashAccessToken(cookies[AUTH_COOKIE_NAME])}`);
+      if (session) return next();
+    } catch (error) {
+      console.error("user session lookup error", error.message);
+      return res.status(503).send("認証状態を確認できませんでした。時間をおいて再試行してください。");
+    }
+  }
   if (isValidDeveloperSession(cookies[DEVELOPER_COOKIE_NAME])) {
     return next();
   }
@@ -297,8 +463,14 @@ app.post("/api/developer/requests/:id/decision", requireDeveloperSession, async 
     if (item.status !== "pending") return res.status(409).json({ error: "この申請はすでに処理されています。" });
     item.status = decision;
     item.decidedAt = new Date().toISOString();
-    await kv.set(key, JSON.stringify(item), { ex: 60 * 60 * 24 * 14 });
-    return res.json({ ok: true, status: decision });
+    let oneTimeCode;
+    if (decision === "approved") {
+      oneTimeCode = String(crypto.randomInt(10000000, 100000000));
+      item.oneTimeCodeHash = hashOneTimeCode(item.id, oneTimeCode);
+      item.oneTimeCodeExpiresAt = new Date(Date.now() + ONE_TIME_CODE_TTL * 1000).toISOString();
+    }
+    await kv.set(key, JSON.stringify(item), { ex: REQUEST_TRACK_TTL });
+    return res.json({ ok: true, status: decision, ...(oneTimeCode ? { oneTimeCode, expiresInSeconds: ONE_TIME_CODE_TTL } : {}) });
   } catch (error) {
     console.error("request decision error", error.message);
     return res.status(503).json({ error: "処理を保存できませんでした。" });
@@ -314,7 +486,7 @@ app.get("/api/developer/console-status", requireDeveloperSession, (req, res) => 
     features: {
       authenticationRequests: "connected",
       approvalQueue: "connected",
-      oneTimeCodes: "not_connected",
+      oneTimeCodes: "connected",
       sessionManagement: "not_connected"
     }
   });
