@@ -108,8 +108,9 @@ const REQUEST_ENTRY_COOKIE = "access_request_entry";
 const REQUEST_TRACK_COOKIE = "access_request_track";
 const REQUEST_ENTRY_TTL = 15 * 60;
 const REQUEST_TRACK_TTL = 60 * 60 * 24 * 14;
-const ONE_TIME_CODE_TTL = 10 * 60;
-const USER_SESSION_TTL = 60 * 60 * 24 * 30;
+const ONE_TIME_CODE_TTL = 60 * 60 * 48; // 48時間
+// 永久承認Cookie。Redis側の承認レコードには有効期限を設定しない。
+const USER_APPROVAL_COOKIE_MAX_AGE = 10 * 365 * 24 * 60 * 60 * 1000; // 10年
 
 function requestEntryOptions() {
   return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: REQUEST_ENTRY_TTL * 1000 };
@@ -118,7 +119,7 @@ function requestTrackOptions() {
   return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: REQUEST_TRACK_TTL * 1000 };
 }
 function userAuthCookieOptions() {
-  return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: USER_SESSION_TTL * 1000 };
+  return { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: USER_APPROVAL_COOKIE_MAX_AGE };
 }
 function hashAccessToken(value) {
   return crypto.createHash("sha256").update(String(value)).digest("hex");
@@ -277,9 +278,21 @@ app.post("/api/access/verify-code", async (req, res) => {
     if (consumed !== "OK") return res.status(409).json({ error: "このワンタイムパスワードはすでに使用されています。" });
 
     const sessionToken = crypto.randomBytes(32).toString("hex");
-    await kv.set(`access:session:${hashAccessToken(sessionToken)}`, JSON.stringify({ requestId, createdAt: new Date().toISOString() }), { ex: USER_SESSION_TTL });
+    const approvalId = hashAccessToken(sessionToken);
+    const approvedAt = new Date().toISOString();
+    const approvalRecord = {
+      id: approvalId,
+      requestId,
+      displayName: item.displayName,
+      approvedAt,
+      status: "active"
+    };
+    // 永久承認レコード。期限を付けず、管理者が取り消すまで有効。
+    await kv.set(`access:approval:${approvalId}`, JSON.stringify(approvalRecord));
+    await kv.lpush("access:approvals", approvalId);
     item.status = "completed";
-    item.completedAt = new Date().toISOString();
+    item.completedAt = approvedAt;
+    item.approvalId = approvalId;
     delete item.oneTimeCodeHash;
     delete item.oneTimeCodeExpiresAt;
     await kv.set(key, JSON.stringify(item), { ex: REQUEST_TRACK_TTL });
@@ -394,11 +407,15 @@ app.use(async (req, res, next) => {
   }
   if (cookies[AUTH_COOKIE_NAME]) {
     try {
-      const session = await kv.get(`access:session:${hashAccessToken(cookies[AUTH_COOKIE_NAME])}`);
-      if (session) return next();
+      const tokenHash = hashAccessToken(cookies[AUTH_COOKIE_NAME]);
+      const approval = await kv.get(`access:approval:${tokenHash}`);
+      if (approval) return next();
+      // 旧バージョンで発行済みの30日セッションは期限まで互換維持。
+      const legacySession = await kv.get(`access:session:${tokenHash}`);
+      if (legacySession) return next();
     } catch (error) {
-      console.error("user session lookup error", error.message);
-      return res.status(503).send("認証状態を確認できませんでした。時間をおいて再試行してください。");
+      console.error("user approval lookup error", error.message);
+      return res.status(503).send("認証状態を確認できませんでした。");
     }
   }
   if (isValidDeveloperSession(cookies[DEVELOPER_COOKIE_NAME])) {
@@ -477,8 +494,47 @@ app.post("/api/developer/requests/:id/decision", requireDeveloperSession, async 
   }
 });
 
+// 永久承認一覧（開発者のみ）
+app.get("/api/developer/approvals", requireDeveloperSession, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const ids = await kv.lrange("access:approvals", 0, 499);
+    const approvals = [];
+    const seen = new Set();
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const raw = await kv.get(`access:approval:${id}`);
+      if (!raw) continue;
+      const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (item.status === "active") approvals.push(item);
+    }
+    return res.json({ ok: true, approvals });
+  } catch (error) {
+    console.error("approval list error", error.message);
+    return res.status(503).json({ ok: false, error: "永久承認一覧を取得できませんでした。" });
+  }
+});
+
+// 永久承認の取り消し。Cookieが残っていても次のアクセスから拒否される。
+app.post("/api/developer/approvals/:id/revoke", requireDeveloperSession, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const id = String(req.params.id || "");
+  if (!/^[a-f0-9]{64}$/.test(id)) return res.status(400).json({ error: "不正な承認IDです。" });
+  try {
+    const key = `access:approval:${id}`;
+    const raw = await kv.get(key);
+    if (!raw) return res.status(404).json({ error: "承認が見つからないか、すでに取り消されています。" });
+    const item = typeof raw === "string" ? JSON.parse(raw) : raw;
+    await kv.del(key);
+    return res.json({ ok: true, revoked: true, displayName: item.displayName || "" });
+  } catch (error) {
+    console.error("approval revoke error", error.message);
+    return res.status(503).json({ error: "承認を取り消せませんでした。" });
+  }
+});
+
 // コンソール用APIも開発者セッション専用。
-// 現段階では表示用の状態だけ返し、未実装機能を架空の件数で表示しない。
 app.get("/api/developer/console-status", requireDeveloperSession, (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   return res.json({
@@ -487,7 +543,8 @@ app.get("/api/developer/console-status", requireDeveloperSession, (req, res) => 
       authenticationRequests: "connected",
       approvalQueue: "connected",
       oneTimeCodes: "connected",
-      sessionManagement: "not_connected"
+      sessionManagement: "not_connected",
+      permanentApprovals: "connected"
     }
   });
 });
